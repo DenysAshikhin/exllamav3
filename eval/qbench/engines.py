@@ -718,15 +718,17 @@ class LlamaCppBackend:
         self.device = device
         self.info = gguf_storage_info(source)
         split_modes = {
-            "layer": llama_cpp.LLAMA_SPLIT_MODE_LAYER,
-            "row": llama_cpp.LLAMA_SPLIT_MODE_ROW,
-            "none": llama_cpp.LLAMA_SPLIT_MODE_NONE,  # everything on main_gpu
+            "layer": llama_cpp.llama_cpp.llama_split_mode.LLAMA_SPLIT_MODE_LAYER,
+            "row": llama_cpp.llama_cpp.llama_split_mode.LLAMA_SPLIT_MODE_ROW,
+            "none": llama_cpp.llama_cpp.llama_split_mode.LLAMA_SPLIT_MODE_NONE,  # everything on main_gpu
         }
         self.model = Llama(
             model_path = source,
             logits_all = True,
             verbose = False,
             n_ctx = max_len,
+            n_batch = 512,
+            n_ubatch = 512,
             n_gpu_layers = options.get("n_gpu_layers", 999),
             split_mode = split_modes[options.get("split_mode", "layer")],
             main_gpu = options.get("main_gpu", 0),
@@ -736,6 +738,15 @@ class LlamaCppBackend:
         assert not noise_eps, "Noise injection not supported for llamacpp engine"
         with ProgressBar("Evaluating", ids.shape[0]) as pb:
             for r in range(ids.shape[0]):
+                # Llama.reset() only zeroes the Python-side token counter. The KV/recurrent state
+                # has to be dropped explicitly, or row r+1 starts at position 0 while sequence 0
+                # still holds row r's positions and llama_decode rejects the batch with
+                # "inconsistent sequence positions". No public API for this; llama-cpp-python
+                # itself reaches into _ctx the same way. Rows are independent, so the hybrid
+                # checkpoints go with it rather than accumulating stale host copies
+                self.model._ctx.memory_clear(True)
+                if self.model._hybrid_cache_mgr is not None:
+                    self.model._hybrid_cache_mgr.clear()
                 self.model.reset()
                 self.model.eval(ids[r].tolist())
                 logits = torch.from_numpy(self.model.scores).unsqueeze(0)

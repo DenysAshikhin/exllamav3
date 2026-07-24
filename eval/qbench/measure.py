@@ -58,7 +58,10 @@ class DiffStats:
         # kld vs reference
         if self.ref_store:
             ref = load_tensor(os.path.join(self.ref_store, f"row_{r:06d}.safetensors"), "logits")
-            ref = ref.to(logits.device).float()
+            # Kept in the stored fp16: compute_kl_div casts to fp32 inside the kernel, so an
+            # explicit upcast here only doubles the reference's VRAM footprint (3.8 GB/row at
+            # this vocab size), which is the difference between fitting and not on 24 GB
+            ref = ref.to(logits.device)
             vs = min(self.vocab_size, logits.shape[-1], ref.shape[-1])
             kl = compute_kl_div(logits.squeeze(0), ref.squeeze(0), vs)
             self.kl_toks.append(kl.flatten().float().cpu())
