@@ -84,6 +84,30 @@ def group_marker_size(group, base):
     return base * 1.35 if group == "EXL3" else base
 
 
+def make_model_palette(entries):
+    """
+    One colour per model rather than per group. The combined histogram overlays every model on
+    a single axis, where a group-wide hue makes eleven EXL3 curves indistinguishable. Each
+    group walks its own perceptual ramp in declaration order (bitrate-ascending in practice),
+    so adjacent bitrates get adjacent hues and the progression reads as a progression, while
+    the groups stay separable from each other.
+    """
+    ramps = {"EXL3": "flare", "GGUF": "crest", "AWQ": "mako"}
+    spare = ["viridis", "rocket", "magma"]
+    by_group = {}
+    for e in entries:
+        by_group.setdefault(e["group"], []).append(e["label"])
+    palette = {}
+    for i, group in enumerate(sorted(by_group)):
+        labels = by_group[group]
+        ramp = ramps.get(group, spare[i % len(spare)])
+        # n_colors >= 3 keeps a single-model group off the extreme dark end of its ramp
+        cols = sns.color_palette(ramp, n_colors = max(len(labels), 3))
+        for label, col in zip(labels, cols):
+            palette[label] = col
+    return palette
+
+
 def make_palette(groups):
     """Fixed hue per group name; reserved slots for common formats, remainder in stable order"""
     cols = sns.color_palette("tab10", n_colors = 10)
@@ -1082,7 +1106,7 @@ def plot_kld_hist_combined(
     fig, ax = plt.subplots()
     fig.subplots_adjust(left = 0.075, right = 0.975, top = 0.895, bottom = 0.10 if caption is False else 0.185)
     colors = _text_colors(dark)
-    palette = make_palette({e["group"] for e in entries})
+    palette = make_model_palette(entries)
     palette["noise_floor"] = colors["floor"]  # for the floor reference line's label/leader
 
     floor = entries[0]["floor_kl"].float()
@@ -1183,7 +1207,7 @@ def plot_kld_hist_combined(
             line_records.append({"group": "noise floor", "x": centers[fa + i], "y": fy[i]})
 
     for e, counts, a, b in profiles:
-        color = palette[e["group"]]
+        color = palette[e["label"]]
         # The drape runs in display space: log10 counts on a log y axis (g in decades), raw
         # counts on a linear one (g relative to the chart's full height). A light 3-tap
         # smoothing first, so the chain rests on denoised peaks rather than on every
@@ -1193,7 +1217,8 @@ def plot_kld_hist_combined(
                 solid_joinstyle = "round")
         peak = int(np.argmax(y))
         peak_top = max(peak_top, float(y[peak]))
-        rows.append({"group": e["group"], "point_label": e["label"], "x": centers[a:b][peak], "y": y[peak]})
+        rows.append({"group": e["group"], "point_label": e["label"], "color": color,
+                     "x": centers[a:b][peak], "y": y[peak]})
         anchors_xy.append((centers[a:b][peak], y[peak]))
         for i in range(0, b - a, 3):
             line_records.append({"group": f"{e['group']} {e['label']}", "x": centers[a + i], "y": y[i]})
@@ -1213,7 +1238,8 @@ def plot_kld_hist_combined(
 
     if floor_anchor is not None:
         fx, fy_a = floor_anchor
-        rows.append({"group": "noise_floor", "point_label": "noise floor", "x": fx, "y": min(fy_a, y_top * 0.85)})
+        rows.append({"group": "noise_floor", "point_label": "noise floor",
+                     "color": colors["floor"], "x": fx, "y": min(fy_a, y_top * 0.85)})
         anchors_xy.append((fx, min(fy_a, y_top * 0.85)))
 
     ax.set_xlabel("per-token KL divergence" + (" (log)" if x_log else ""))
@@ -1222,12 +1248,18 @@ def plot_kld_hist_combined(
     ax.yaxis.label.set_size(14)
     ax.tick_params(axis = "both", which = "both", labelsize = 12, colors = colors["tick"])
 
+    # One legend entry per model, in the order drawn, since colour now identifies the model
+    # rather than the format. Two columns past six entries so a full bitrate sweep does not
+    # run the legend down the whole axis.
     handles = [
-        Line2D([0], [0], color = palette[g], linewidth = 2.2, label = g)
-        for g in sorted({e["group"] for e, _ in trimmed})
+        Line2D([0], [0], color = palette[e["label"]], linewidth = 2.2, label = e["label"])
+        for e, _ in trimmed
     ]
     handles.append(Line2D([0], [0], color = colors["floor"], linewidth = 1.8, linestyle = ":", label = "noise floor"))
-    ax.legend(handles = handles, loc = "upper left", frameon = False, fontsize = 12)
+    ax.legend(
+        handles = handles, loc = "upper left", frameon = False, fontsize = 11,
+        ncol = 2 if len(handles) > 6 else 1, columnspacing = 1.2, handlelength = 1.6,
+    )
 
     if subtitle:
         ax.set_title(title, pad = 42)
@@ -1247,7 +1279,7 @@ def plot_kld_hist_combined(
     for r in rows:
         texts.append(ax.text(
             r["x"], r["y"], r["point_label"],
-            color = palette[r["group"]], fontsize = 10, fontweight = "bold",
+            color = r["color"], fontsize = 10, fontweight = "bold",
             ha = "center", va = "center",
             bbox = {"boxstyle": "round,pad=0.25", "facecolor": ax.get_facecolor(),
                     "edgecolor": "none", "alpha": 0.75},
@@ -1259,7 +1291,7 @@ def plot_kld_hist_combined(
     best_centers = _layout_labels(fig, ax, rows, anchors, sizes, line_df)
     for t, center, anchor, r in zip(texts, best_centers, anchors, rows):
         t.set_position(ax.transData.inverted().transform(center))
-        _draw_leader(ax, anchor, center, palette[r["group"]])
+        _draw_leader(ax, anchor, center, r["color"])
 
     if caption is not False:
         text = caption if isinstance(caption, str) else default_hist_combined_caption(x_log, y_log, ref_desc)
