@@ -28,6 +28,15 @@ DATASETS = {
         "data_files": "hf://datasets/stas/openwebtext-10k@refs/convert/parquet/plain_text/train/*.parquet",
         "text_column": "text", "display_name": "openwebtext",
     },
+    # Local 23 GB OpenWebText, deliberately a SINGLE shard: get_test_ids joins the whole split
+    # into one string and tokenizes it in one call, so globbing all 80 shards would exhaust host
+    # RAM long before tokenizing. One shard is ~288 MB against the ~164k tokens a 40x4096 test
+    # set needs, so this is a larger sample of OpenWebText -- not a pass over the full corpus.
+    "openwebtext": {
+        "path": "parquet", "name": None, "split": "train",
+        "data_files": "D:/personal/models/elx3/datasets/openwebtext/plain_text/train-00000-of-00080.parquet",
+        "text_column": "text", "display_name": "openwebtext",
+    },
 }
 
 
