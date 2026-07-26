@@ -134,6 +134,14 @@ class TransformersBackend:
         self.device = device
         self.dtype = dtype
         self.streaming = options.get("streaming", False)
+        # Rows per streamed forward. SDPA falls back to its math backend for this model's gated
+        # hybrid attention, materializing [rows, heads, len, len] in fp32, so peak VRAM scales
+        # with the batch and not just the streamed weights: 10 rows at 4096 needs 15.0 GiB, and
+        # a 40-row test set would need 60. Chunking bounds that independently of the test-set
+        # size, at the cost of re-reading the streamed weights once per chunk.
+        self.streaming_rows = int(options.get("streaming_rows", 2))
+        if self.streaming_rows < 1:
+            raise ValueError(f"streaming_rows must be >= 1, got {self.streaming_rows}")
         self.shard_handles = {}
 
         if self.streaming:
@@ -607,8 +615,13 @@ class TransformersBackend:
         walk(base)
         hook_modules = [embed] + list(layers) + extra
 
+        rows = ids.shape[0]
+        chunk = self.streaming_rows
+        chunk_count = (rows + chunk - 1) // chunk
+
         pb_state = {"n": 0}
-        pb = ProgressBar("Streaming", len(hook_modules) + 1)
+        # Every hooked module fires once per chunk, so the total scales with the chunk count
+        pb = ProgressBar("Streaming", chunk_count * len(hook_modules) + 1)
 
         def pre_hook(module, args):
             self._materialize(module)
@@ -627,17 +640,24 @@ class TransformersBackend:
 
         try:
             with pb:
-                # One batched pass: every weight is read exactly once. Activations are
-                # rows x len x hidden, tiny next to the weights being streamed
-                hidden = base(input_ids = ids.to(self.device), use_cache = False).last_hidden_state
-                self._materialize(head)
-                for r in range(ids.shape[0]):
-                    logits = head(hidden[r:r + 1])
-                    if self.logit_softcap:
-                        logits = torch.tanh(logits / self.logit_softcap) * self.logit_softcap
-                    callback(r, logits)
-                self._dematerialize(head)
-                pb.update(len(hook_modules) + 1)
+                # One pass per chunk: every weight is read once per chunk. Hidden states are
+                # chunk x len x hidden, tiny next to both the streamed weights and the
+                # attention matrix that sets the chunk size in the first place
+                for start in range(0, rows, chunk):
+                    stop = min(start + chunk, rows)
+                    hidden = base(
+                        input_ids = ids[start:stop].to(self.device),
+                        use_cache = False,
+                    ).last_hidden_state
+                    self._materialize(head)
+                    for r in range(start, stop):
+                        logits = head(hidden[r - start:r - start + 1])
+                        if self.logit_softcap:
+                            logits = torch.tanh(logits / self.logit_softcap) * self.logit_softcap
+                        callback(r, logits)
+                    self._dematerialize(head)
+                    del hidden
+                pb.update(chunk_count * len(hook_modules) + 1)
         finally:
             for h in hooks:
                 h.remove()
