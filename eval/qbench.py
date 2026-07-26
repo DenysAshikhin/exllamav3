@@ -196,12 +196,25 @@ def main(args):
         metric_label_valign = "center"
         plot_file = None
 
-    def plot_entries(with_kld, include_ref = True):
+    # Plot outputs accept a plain path or {file, ...options}; options are per-plot
+    def plot_spec(key):
+        v = output.get(key)
+        if isinstance(v, dict):
+            return v.get("file"), v
+        return v, {}
+
+    def excluded(spec):
+        """Model labels/groups to drop from one plot, for a tailored cut of a busy chart"""
+        return {str(w) for w in spec.get("exclude", [])}
+
+    def plot_entries(with_kld, include_ref = True, exclude = frozenset()):
         entries = []
         for r in all_results:
             if r["group"] == "noise_floor":
                 continue
             if not include_ref and r["group"] == "reference":
+                continue
+            if r["label"] in exclude or r["group"] in exclude:
                 continue
             if "ppl" not in r:  # invalid model (all logits non-finite)
                 continue
@@ -226,7 +239,8 @@ def main(args):
     floor_line = {"label": "noise floor, mean", "value": floor_res["kld"]} if floor_res else None
 
     def scatter(key, kld, vram):
-        if not output.get(key):
+        path, spec = plot_spec(key)
+        if not path:
             return
         pa = PlotArgs()
         pa.kld = kld
@@ -237,18 +251,20 @@ def main(args):
             r"perplexity"
         )
         pa.metric_label_valign = "bottom" if kld else "center"
-        pa.plot_file = output[key]
+        pa.plot_file = path
         plot_scatter(
-            plot_entries(with_kld = kld, include_ref = kld),
+            plot_entries(with_kld = kld, include_ref = kld, exclude = excluded(spec)),
             pa,
             ref_line = floor_line if kld else ref_line,
         )
-        print(f" -- Saved plot: {output[key]}")
+        print(f" -- Saved plot: {path}")
 
     scatter("plot_ppl", kld = False, vram = False)
     scatter("plot_kld", kld = True, vram = False)
     scatter("plot_ppl_vram", kld = False, vram = True)
     scatter("plot_kld_vram", kld = True, vram = True)
+    # Tailored cut of the same chart, dropping models named in its `exclude` list
+    scatter("plot_kld_vram_tailored", kld = True, vram = True)
 
     for spread_key, spread_vram in (("plot_kld_spread", False), ("plot_kld_spread_vram", True)):
         if output.get(spread_key):
@@ -264,14 +280,8 @@ def main(args):
             )
             print(f" -- Saved plot: {output[spread_key]}")
 
-    # Histogram plot outputs accept a plain path or {file, ...options}
-    def hist_spec(key):
-        v = output.get(key)
-        if isinstance(v, dict):
-            return v.get("file"), v
-        return v, {}
-
-    hist_specs = {k: hist_spec(k) for k in ("plot_kld_hist", "plot_kld_hist_combined")}
+    combined_keys = ("plot_kld_hist_combined", "plot_kld_hist_combined_tailored")
+    hist_specs = {k: plot_spec(k) for k in ("plot_kld_hist", *combined_keys)}
     if any(path for path, _ in hist_specs.values()):
         if floor_kl is None:
             print(" -- histogram plots require the noise floor pass (noise_floor: true, non-llamacpp reference)")
@@ -303,8 +313,10 @@ def main(args):
                 )
                 print(f" -- Saved plot: {path}")
 
-            path, opts = hist_specs["plot_kld_hist_combined"]
-            if path and hist_entries:
+            for combined_key in combined_keys:
+                path, opts = hist_specs[combined_key]
+                if not (path and hist_entries):
+                    continue
                 entries = hist_entries
                 if opts.get("labels"):
                     # Match on display label or group, so entries disambiguated by group can be
@@ -313,7 +325,10 @@ def main(args):
                     entries = [e for e in hist_entries if e["label"] in want or e["group"] in want]
                     for w in want:
                         if not any(w in (e["label"], e["group"]) for e in hist_entries):
-                            print(f" -- plot_kld_hist_combined: no model labeled {w!r}, skipping it")
+                            print(f" -- {combined_key}: no model labeled {w!r}, skipping it")
+                drop = excluded(opts)
+                if drop:
+                    entries = [e for e in entries if e["label"] not in drop and e["group"] not in drop]
                 if entries:
                     plot_kld_hist_combined(
                         entries,

@@ -94,6 +94,7 @@ def resolve_project_paths(project: dict, project_file: str):
     output = project.get("output", {})
     for key in ("plot_ppl", "plot_kld", "plot_ppl_vram", "plot_kld_vram", "plot_kld_spread",
                 "plot_kld_spread_vram", "plot_kld_hist", "plot_kld_hist_combined",
+                "plot_kld_vram_tailored", "plot_kld_hist_combined_tailored",
                 "results", "interactive"):
         v = output.get(key)
         if not v:
