@@ -673,15 +673,12 @@ def plot_scatter(results, args, ref_line = None):
     point (keeps a distant reference from compressing the interesting region).
     """
     x_key = "vram_gb" if args.vram else "layer_bpw"
-    y_key = "kld" if args.kld else "ppl"
+    y_key = args.metric_key
     x_label = (
         r"quantized weight size $|W_q|$ / GiB (excl. embeddings, incl. output head)" if args.vram else
         r"bits per weight (excl. embeddings and output head)"
     )
-    y_label = (
-        r"mean KL divergence, $D_{\mathrm{KL}}(p_{\mathrm{FP}} \parallel p_{\mathrm{quant}})$" if args.kld else
-        r"perplexity"
-    )
+    y_label = args.metric_label
 
     rows = []
     for r in results:
@@ -776,8 +773,8 @@ def plot_scatter(results, args, ref_line = None):
     ax.set_ylabel(y_label)
     ax.xaxis.label.set_size(14)
     ax.yaxis.label.set_size(14)
-    if args.kld:
-        ax.yaxis.label.set_verticalalignment("bottom")
+    # Tall multi-line math labels sit better bottom-aligned against the axis
+    ax.yaxis.label.set_verticalalignment(args.metric_label_valign)
     colors = _text_colors(args.dark)
     ax.tick_params(axis = "both", which = "major", labelsize = 13, colors = colors["tick"])
     subtitle = getattr(args, "subtitle", None)

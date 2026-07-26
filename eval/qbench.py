@@ -191,6 +191,9 @@ def main(args):
         max_y = 999999
         dark = output.get("dark", True)
         kld = False
+        metric_key = "ppl"
+        metric_label = r"perplexity"
+        metric_label_valign = "center"
         plot_file = None
 
     def plot_entries(with_kld, include_ref = True):
@@ -228,6 +231,12 @@ def main(args):
         pa = PlotArgs()
         pa.kld = kld
         pa.vram = vram
+        pa.metric_key = "kld" if kld else "ppl"
+        pa.metric_label = (
+            r"mean KL divergence, $D_{\mathrm{KL}}(p_{\mathrm{FP}} \parallel p_{\mathrm{quant}})$" if kld else
+            r"perplexity"
+        )
+        pa.metric_label_valign = "bottom" if kld else "center"
         pa.plot_file = output[key]
         plot_scatter(
             plot_entries(with_kld = kld, include_ref = kld),
