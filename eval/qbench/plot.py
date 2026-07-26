@@ -84,6 +84,117 @@ def group_marker_size(group, base):
     return base * 1.35 if group == "EXL3" else base
 
 
+def combined_hist_series(entries, x_log = True, y_log = False, n_bins = 120):
+    """
+    Binning and drape for the combined per-token KLD histogram. The static chart and the
+    interactive HTML both consume this, so the two cannot drift apart: same p1-p99 trim, same
+    shared bin grid, same smoothing.
+
+    Returns None when nothing is plottable, otherwise:
+      centers    bin centres, length n_bins
+      series     per model, in entry order: label, group, color, first/last non-empty bin
+                 index (a, b) and the shaped y over centers[a:b]
+      floor      the noise floor's own shaped distribution over the same bins, or None
+      gmin/gmax  x crop, taken from the MODELS only
+      max_count  tallest raw bin; the linear-y drape stiffness reference
+    """
+    palette = make_model_palette(entries)
+
+    # Per-model p1-p99 trim of the raw per-token KLD, and the same for the noise floor's own
+    # distribution (the dotted reference whose peak marks the floor scale)
+    trimmed = []
+    for e in entries:
+        kl = e["kl"].float()
+        d = kl[torch.isfinite(kl)].clamp(min = 0.0).numpy()
+        if d.size == 0:
+            continue
+        lo, hi = np.percentile(d, [1, 99])
+        trimmed.append((e, d[(d >= lo) & (d <= hi)]))
+    if not trimmed:
+        return None
+
+    floor = entries[0]["floor_kl"].float()
+    ffin = floor[torch.isfinite(floor)].clamp(min = 0.0).numpy()
+    flo, fhi = np.percentile(ffin, [1, 99])
+    floor_d = ffin[(ffin >= flo) & (ffin <= fhi)]
+
+    # Bounds from the MODELS only: everything left of their range is uninteresting (the
+    # floor's lower tail), so the axis crops there and the floor line clips off the edge
+    # Left edge from the smallest POSITIVE value: exact-zero tokens are common (and the fp16
+    # KLD sidecars flush everything below ~6e-8 to zero anyway), so a min() over raw values
+    # collapses to the 1e-9 fallback and opens a structurally empty band on a log axis between
+    # 1e-9 and the smallest representable positive value
+    pos_mins = [float(d[d > 0].min()) for _, d in trimmed if bool((d > 0).any())]
+    gmin = max(min(pos_mins) if pos_mins else 1e-9, 1e-9)
+    gmax = max(d.max() for _, d in trimmed)
+
+    if x_log:
+        def fwd(x):
+            return np.log10(np.maximum(x, 1e-12))
+
+        def inv(t):
+            return 10.0 ** t
+    else:
+        def fwd(x):
+            return x
+
+        def inv(t):
+            return t
+
+    # Shared bins over the cropped range, uniform in (transformed) x, so every line is drawn
+    # against the same grid and bin width is constant on screen. Data outside the range
+    # (the floor's tails, other models' out-of-crop mass) simply isn't binned
+    t0 = fwd(gmin) if x_log else 0.0
+    edges = inv(np.linspace(t0, fwd(gmax), n_bins + 1))
+    centers = inv(0.5 * (fwd(edges[:-1]) + fwd(edges[1:])))
+
+    # First pass: bin counts per model (the linear-y drape stiffness scales to the global peak)
+    profiles = []
+    for e, d in trimmed:
+        counts, _ = np.histogram(d, bins = edges)
+        nz = np.nonzero(counts)[0]
+        if nz.size:
+            profiles.append((e, counts, nz[0], nz[-1] + 1))
+    if not profiles:
+        return None
+    floor_counts, _ = np.histogram(floor_d, bins = edges)
+    max_count = max(
+        max(int(c[a:b].max()) for _, c, a, b in profiles),
+        int(floor_counts.max()) if floor_counts.size else 0,
+    )
+
+    def shape_line(counts, a, b):
+        """3-tap denoise then the drape, in display space.
+
+        The drape runs in display space: log10 counts on a log y axis (g in decades), raw
+        counts on a linear one (g relative to the chart's full height). Light 3-tap smoothing
+        first, so the chain rests on denoised peaks rather than on every single-count spike.
+        """
+        if y_log:
+            y = np.log10(np.clip(counts[a:b], 0.6, None))
+        else:
+            y = counts[a:b].astype(np.float64)
+        if y.size > 2:
+            y = np.convolve(np.pad(y, 1, mode = "edge"), [0.2, 0.6, 0.2], mode = "valid")
+        y = _drape(y, g = 0.025 if y_log else 0.01 * max_count)
+        return 10.0 ** y if y_log else y
+
+    series = [
+        {"label": e["label"], "group": e["group"], "color": palette[e["label"]],
+         "a": int(a), "b": int(b), "y": shape_line(counts, a, b)}
+        for e, counts, a, b in profiles
+    ]
+
+    floor_series = None
+    fnz = np.nonzero(floor_counts)[0]
+    if fnz.size:
+        fa, fb = int(fnz[0]), int(fnz[-1] + 1)
+        floor_series = {"a": fa, "b": fb, "y": shape_line(floor_counts, fa, fb)}
+
+    return {"centers": centers, "series": series, "floor": floor_series,
+            "gmin": gmin, "gmax": gmax, "max_count": max_count}
+
+
 def make_model_palette(entries):
     """
     One colour per model rather than per group. The combined histogram overlays every model on
@@ -1109,83 +1220,14 @@ def plot_kld_hist_combined(
     palette = make_model_palette(entries)
     palette["noise_floor"] = colors["floor"]  # for the floor reference line's label/leader
 
-    floor = entries[0]["floor_kl"].float()
-
-    # Per-model p1-p99 trim of the raw per-token KLD, and the same for the noise floor's own
-    # distribution (the dotted reference whose peak marks the floor scale)
-    trimmed = []
-    for e in entries:
-        kl = e["kl"].float()
-        d = kl[torch.isfinite(kl)].clamp(min = 0.0).numpy()
-        if d.size == 0:
-            continue
-        lo, hi = np.percentile(d, [1, 99])
-        trimmed.append((e, d[(d >= lo) & (d <= hi)]))
-    if not trimmed:
+    computed = combined_hist_series(entries, x_log = x_log, y_log = y_log)
+    if computed is None:
         plt.close(fig)
         return
-
-    ffin = floor[torch.isfinite(floor)].clamp(min = 0.0).numpy()
-    flo, fhi = np.percentile(ffin, [1, 99])
-    floor_d = ffin[(ffin >= flo) & (ffin <= fhi)]
-
-    # Bounds from the MODELS only: everything left of their range is uninteresting (the
-    # floor's lower tail), so the axis crops there and the floor line clips off the edge
-    # Left edge from the smallest POSITIVE value: exact-zero tokens are common (and the fp16
-    # KLD sidecars flush everything below ~6e-8 to zero anyway), so a min() over raw values
-    # collapses to the 1e-9 fallback and opens a structurally empty band on a log axis between
-    # 1e-9 and the smallest representable positive value
-    pos_mins = [float(d[d > 0].min()) for _, d in trimmed if bool((d > 0).any())]
-    gmin = max(min(pos_mins) if pos_mins else 1e-9, 1e-9)
-    gmax = max(d.max() for _, d in trimmed)
-
-    if x_log:
-        def fwd(x):
-            return np.log10(np.maximum(x, 1e-12))
-
-        def inv(t):
-            return 10.0 ** t
-    else:
-        def fwd(x):
-            return x
-
-        def inv(t):
-            return t
-
-    # Shared bins over the cropped range, uniform in (transformed) x, so every line is drawn
-    # against the same grid and bin width is constant on screen. Data outside the range
-    # (the floor's tails, other models' out-of-crop mass) simply isn't binned
-    n_bins = 120
-    t0 = fwd(gmin) if x_log else 0.0
-    edges = inv(np.linspace(t0, fwd(gmax), n_bins + 1))
-    centers = inv(0.5 * (fwd(edges[:-1]) + fwd(edges[1:])))
-
-    # First pass: bin counts per model (the linear-y drape stiffness scales to the global peak)
-    profiles = []
-    for e, d in trimmed:
-        counts, _ = np.histogram(d, bins = edges)
-        nz = np.nonzero(counts)[0]
-        if nz.size:
-            profiles.append((e, counts, nz[0], nz[-1] + 1))
-    if not profiles:
-        plt.close(fig)
-        return
-    floor_counts, _ = np.histogram(floor_d, bins = edges)
-    max_count = max(
-        max(int(c[a:b].max()) for _, c, a, b in profiles),
-        int(floor_counts.max()) if floor_counts.size else 0,
-    )
-
-    def shape_line(counts, a, b):
-        """3-tap denoise then the drape, in display space (see the model loop comment)"""
-        if y_log:
-            y = np.log10(np.clip(counts[a:b], 0.6, None))
-        else:
-            y = counts[a:b].astype(np.float64)
-        if y.size > 2:
-            y = np.convolve(np.pad(y, 1, mode = "edge"), [0.2, 0.6, 0.2], mode = "valid")
-        y = _drape(y, g = 0.025 if y_log else 0.01 * max_count)
-        return 10.0 ** y if y_log else y
+    centers = computed["centers"]
+    series = computed["series"]
+    floor_series = computed["floor"]
+    gmin, gmax = computed["gmin"], computed["gmax"]
 
     rows, anchors_xy, line_records = [], [], []
     peak_top = 1.0
@@ -1195,10 +1237,8 @@ def plot_kld_hist_combined(
     # it may clip at the top, its position and spread are what matter. Label anchor is
     # clamped into view below
     floor_anchor = None
-    fnz = np.nonzero(floor_counts)[0]
-    if fnz.size:
-        fa, fb = fnz[0], fnz[-1] + 1
-        fy = shape_line(floor_counts, fa, fb)
+    if floor_series is not None:
+        fa, fb, fy = floor_series["a"], floor_series["b"], floor_series["y"]
         ax.plot(centers[fa:fb], fy, color = colors["floor"], linewidth = 1.8, linestyle = ":",
                 alpha = 0.95, zorder = 2)
         fpeak = int(np.argmax(fy))
@@ -1206,22 +1246,17 @@ def plot_kld_hist_combined(
         for i in range(0, fb - fa, 3):
             line_records.append({"group": "noise floor", "x": centers[fa + i], "y": fy[i]})
 
-    for e, counts, a, b in profiles:
-        color = palette[e["label"]]
-        # The drape runs in display space: log10 counts on a log y axis (g in decades), raw
-        # counts on a linear one (g relative to the chart's full height). A light 3-tap
-        # smoothing first, so the chain rests on denoised peaks rather than on every
-        # single-count spike
-        y = shape_line(counts, a, b)
+    for s in series:
+        a, b, y, color = s["a"], s["b"], s["y"], s["color"]
         ax.plot(centers[a:b], y, color = color, linewidth = 2.0, alpha = 0.95, zorder = 3,
                 solid_joinstyle = "round")
         peak = int(np.argmax(y))
         peak_top = max(peak_top, float(y[peak]))
-        rows.append({"group": e["group"], "point_label": e["label"], "color": color,
+        rows.append({"group": s["group"], "point_label": s["label"], "color": color,
                      "x": centers[a:b][peak], "y": y[peak]})
         anchors_xy.append((centers[a:b][peak], y[peak]))
         for i in range(0, b - a, 3):
-            line_records.append({"group": f"{e['group']} {e['label']}", "x": centers[a + i], "y": y[i]})
+            line_records.append({"group": f"{s['group']} {s['label']}", "x": centers[a + i], "y": y[i]})
 
     if x_log:
         ax.set_xscale("log")
@@ -1252,8 +1287,8 @@ def plot_kld_hist_combined(
     # rather than the format. Two columns past six entries so a full bitrate sweep does not
     # run the legend down the whole axis.
     handles = [
-        Line2D([0], [0], color = palette[e["label"]], linewidth = 2.2, label = e["label"])
-        for e, _ in trimmed
+        Line2D([0], [0], color = s["color"], linewidth = 2.2, label = s["label"])
+        for s in series
     ]
     handles.append(Line2D([0], [0], color = colors["floor"], linewidth = 1.8, linestyle = ":", label = "noise floor"))
     ax.legend(

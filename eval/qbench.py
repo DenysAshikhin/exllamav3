@@ -52,6 +52,7 @@ from qbench.measure import (
     print_stats,
     save_reference_row,
 )
+from qbench.interactive import write_kld_hist_html
 from qbench.plot import plot_kld_hist, plot_kld_hist_combined, plot_kld_spread, plot_scatter
 
 torch.set_printoptions(precision = 5, sci_mode = False, linewidth = 200)
@@ -281,7 +282,8 @@ def main(args):
             print(f" -- Saved plot: {output[spread_key]}")
 
     combined_keys = ("plot_kld_hist_combined", "plot_kld_hist_combined_tailored")
-    hist_specs = {k: plot_spec(k) for k in ("plot_kld_hist", *combined_keys)}
+    # `interactive` shares the sidecar requirement, so it gates on the same check
+    hist_specs = {k: plot_spec(k) for k in ("plot_kld_hist", *combined_keys, "interactive")}
     if any(path for path, _ in hist_specs.values()):
         if floor_kl is None:
             print(" -- histogram plots require the noise floor pass (noise_floor: true, non-llamacpp reference)")
@@ -343,8 +345,28 @@ def main(args):
                     )
                     print(f" -- Saved plot: {path}")
 
-    if output.get("interactive"):
-        print(" -- output.interactive is not implemented yet")
+            # Interactive HTML of the same combined histogram, models toggleable
+            path, opts = plot_spec("interactive")
+            if path and hist_entries:
+                entries = hist_entries
+                if opts.get("labels"):
+                    want = [str(w) for w in opts["labels"]]
+                    entries = [e for e in entries if e["label"] in want or e["group"] in want]
+                drop = excluded(opts)
+                if drop:
+                    entries = [e for e in entries if e["label"] not in drop and e["group"] not in drop]
+                if entries and write_kld_hist_html(
+                    entries,
+                    project.get("title", "qbench"),
+                    dataset_subtitle(project),
+                    output.get("dark", True),
+                    path,
+                    caption = output.get("caption", True),
+                    x_log = opts.get("x_log", True),
+                    y_log = opts.get("y_log", False),
+                    ref_desc = ref_desc,
+                ):
+                    print(f" -- Saved interactive: {path}")
 
 
 if __name__ == "__main__":
