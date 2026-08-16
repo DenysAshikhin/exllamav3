@@ -9,6 +9,7 @@ import numpy as np
 import json
 from ..util import Timer
 from ..ext import exllamav3_ext as ext
+from .frozen_tensors import FrozenTensorSource
 from functools import cached_property
 import time
 
@@ -215,6 +216,7 @@ class SafetensorsCollection:
         self.add_tensor_files(directory)
 
         self.new_tensors = None
+        self.frozen_source = None
         self.deferred_mode = False
         self.deferred_loads = []
 
@@ -251,7 +253,9 @@ class SafetensorsCollection:
         self,
         key: str,
     ):
-        if self.new_tensors and key in self.new_tensors:
+        if self.frozen_source is not None:
+            return self.frozen_source.has_tensor(key)
+        if self.new_tensors is not None and key in self.new_tensors:
             return True
         return key in self.tensor_file_map
 
@@ -264,8 +268,11 @@ class SafetensorsCollection:
         if isinstance(key, list):
             return all(self.has_tensor_group(k, subkeys) for k in key)
 
+        if self.frozen_source is not None:
+            return self.frozen_source.has_tensor_group(key, subkeys)
+
         sources = [self.tensor_file_map]
-        if self.new_tensors:
+        if self.new_tensors is not None:
             sources += [self.new_tensors]
         return any(
             all(
@@ -281,6 +288,8 @@ class SafetensorsCollection:
         self,
         prefix: str,
     ):
+        if self.frozen_source is not None:
+            return self.frozen_source.get_tensor_sizes(prefix)
         assert self.new_tensors is None
         if prefix in self.tensor_file_map:
             keys = [prefix]
@@ -296,6 +305,8 @@ class SafetensorsCollection:
         key: str,
         optional: bool = False
     ):
+        if self.frozen_source is not None:
+            return self.frozen_source.get_tensor_size(key, optional)
         assert self.new_tensors is None
         if not key in self.tensor_file_map:
             if not optional:
@@ -327,6 +338,8 @@ class SafetensorsCollection:
         prefix: str,
         only_serializable: bool = False
     ) -> dict:
+        if self.frozen_source is not None:
+            return self.frozen_source.list_tensors(prefix, only_serializable)
         assert self.new_tensors is None
         if prefix in self.tensor_file_map:
             keys = [prefix]
@@ -355,6 +368,8 @@ class SafetensorsCollection:
         key: str,
         optional: bool = True
     ) -> dict | None:
+        if self.frozen_source is not None:
+            return self.frozen_source.get_tensor_meta(key, optional)
         filename = self.tensor_file_map.get(key)
         if optional and key is None:
             return None
@@ -377,6 +392,8 @@ class SafetensorsCollection:
         device: torch.device | None = None,
         allow_bf16: bool = False,
     ) -> dict:
+        if self.frozen_source is not None:
+            return self.frozen_source.get_tensors(prefix, device, allow_bf16)
         assert self.new_tensors is None
         if prefix in self.tensor_file_map:
             keys = [prefix]
@@ -400,10 +417,23 @@ class SafetensorsCollection:
         fidx: int = None,
     ) -> torch.Tensor | None:
 
+        if self.frozen_source is not None:
+            return self.frozen_source.get_tensor(
+                key,
+                device,
+                optional,
+                allow_bf16,
+                float2half,
+                no_defer,
+                transpose,
+                pad_to,
+                fidx,
+            )
+
         # Misses first (optional probes for absent tensors are a large share of all calls during
         # a bulk load, so the miss path stays minimal)
         if key not in self.tensor_file_map:
-            if self.new_tensors and key in self.new_tensors:
+            if self.new_tensors is not None and key in self.new_tensors:
                 tensor = self.new_tensors[key].to(device if device is not None else "cpu")
                 if transpose:
                     tensor = tensor.T.contiguous()
@@ -419,7 +449,7 @@ class SafetensorsCollection:
         if fidx is not None:
             assert no_defer, "Cannot load fused tensor in deferred mode"
 
-        if self.new_tensors and key in self.new_tensors:
+        if self.new_tensors is not None and key in self.new_tensors:
             tensor = self.new_tensors[key].to(device)
             if transpose:
                 tensor = tensor.T.contiguous()
@@ -580,11 +610,21 @@ class SafetensorsCollection:
 
 
     def max_key_len(self):
+        if self.frozen_source is not None:
+            return self.frozen_source.max_key_len()
         return self._max_key_len
 
 
     def set_new_tensors(self, new_tensors):
+        """Install an in-memory conversion overlay with disk fallback."""
         self.new_tensors = new_tensors
+        self.frozen_source = None
+
+
+    def set_frozen_source(self, source: FrozenTensorSource | None):
+        self.frozen_source = source
+        if source is not None:
+            self.new_tensors = None
 
 
     def begin_deferred_load(self):
@@ -732,6 +772,10 @@ class VariantSafetensorsCollection(SafetensorsCollection):
         self.stcs = [(filters, rx, stc)] + self.stcs
 
 
+    def _get_frozen_source(self):
+        return getattr(self, "frozen_source", None)
+
+
     def find_stc(self, key):
         for filters, rx, stc in self.stcs:
             if rx.fullmatch(key):
@@ -743,6 +787,8 @@ class VariantSafetensorsCollection(SafetensorsCollection):
         self,
         key: str,
     ):
+        if (source := self._get_frozen_source()) is not None:
+            return source.has_tensor(key)
         stc = self.find_stc(key)
         return stc.has_tensor(key)
 
@@ -752,6 +798,8 @@ class VariantSafetensorsCollection(SafetensorsCollection):
         key: str,
         subkeys: list,
     ):
+        if (source := self._get_frozen_source()) is not None:
+            return source.has_tensor_group(key, subkeys)
         for subkey in subkeys:
             sk_exists = False
             for sk in [subkey] if isinstance(subkey, str) else subkey:
@@ -769,6 +817,8 @@ class VariantSafetensorsCollection(SafetensorsCollection):
         self,
         prefix: str,
     ):
+        if (source := self._get_frozen_source()) is not None:
+            return source.get_tensor_sizes(prefix)
         if prefix not in self._get_tensor_sizes_cache:
             keys = [self.main.tensor_file_map.get(prefix)]
             if keys[0] is None:
@@ -784,6 +834,8 @@ class VariantSafetensorsCollection(SafetensorsCollection):
         key: str,
         optional: bool = False
     ):
+        if (source := self._get_frozen_source()) is not None:
+            return source.get_tensor_size(key, optional)
         stc = self.find_stc(key)
         return stc.get_tensor_size(key, optional)
 
@@ -793,6 +845,8 @@ class VariantSafetensorsCollection(SafetensorsCollection):
         prefix: str,
         only_serializable: bool = False
     ) -> dict:
+        if (source := self._get_frozen_source()) is not None:
+            return source.list_tensors(prefix, only_serializable)
         if prefix in self.main.tensor_file_map:
             keys = [prefix]
         else:
@@ -834,6 +888,8 @@ class VariantSafetensorsCollection(SafetensorsCollection):
         device: torch.device | None = None,
         allow_bf16: bool = False,
     ) -> dict:
+        if (source := self._get_frozen_source()) is not None:
+            return source.get_tensors(prefix, device, allow_bf16)
         keys = [
             key for key in self.main.tensor_file_map.keys()
             if key == prefix or key.startswith(prefix + ".")
@@ -848,6 +904,8 @@ class VariantSafetensorsCollection(SafetensorsCollection):
         *args,
         **kwargs,
     ) -> torch.Tensor | None:
+        if (source := self._get_frozen_source()) is not None:
+            return source.get_tensor(key, *args, **kwargs)
         stc = self.find_stc(key)
         return stc.get_tensor(key, *args, **kwargs)
 
@@ -858,6 +916,8 @@ class VariantSafetensorsCollection(SafetensorsCollection):
 
 
     def max_key_len(self):
+        if (source := self._get_frozen_source()) is not None:
+            return source.max_key_len()
         return self.main.max_key_len()
 
 
