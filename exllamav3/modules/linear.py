@@ -405,7 +405,18 @@ class Linear(Module):
     @override
     def get_tensors(self):
         if self.device:
-            return self.inner.get_tensors(self.key)
+            tensors = self.inner.get_tensors(self.key)
+            if self.quant_type == "fp16" and self.weight_scale != 1.0:
+                weight_key = f"{self.key}.weight"
+                tensors[weight_key] = (
+                    tensors[weight_key].float() / self.weight_scale
+                ).to(tensors[weight_key].dtype)
+                bias_key = f"{self.key}.bias"
+                if bias_key in tensors:
+                    tensors[bias_key] = (
+                        tensors[bias_key].float() / self.weight_scale
+                    ).to(tensors[bias_key].dtype)
+            return tensors
         else:
             return {}
 
