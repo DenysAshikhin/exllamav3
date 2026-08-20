@@ -8,50 +8,7 @@ from exllamav3.loader import safetensors as safetensors_module
 from exllamav3.loader.frozen_tensors import FrozenTensorSource
 from exllamav3.loader.safetensors import SafetensorsCollection, VariantSafetensorsCollection
 from exllamav3.model.model import Model
-
-
-class FakeCollection:
-    def __init__(self):
-        self.read_keys = set()
-
-
-class FakeConfig:
-    def __init__(self, moe_cpu_hosts=None):
-        self.moe_cpu_hosts = {} if moe_cpu_hosts is None else moe_cpu_hosts
-        self.stc = FakeCollection()
-
-
-class FakeModule:
-    def __init__(self, device, tensors, key="model.fake"):
-        self.device = device
-        self.key = key
-        self._tensors = tensors
-
-    def __iter__(self):
-        yield self
-
-    def get_tensors(self):
-        return self._tensors
-
-    def unload(self):
-        self.device = None
-
-
-def make_model(
-    modules,
-    *,
-    output_device=torch.device("cuda:0"),
-    loaded_tp=False,
-    active_devices=None,
-    moe_cpu_hosts=None,
-):
-    model = Model.__new__(Model)
-    model.modules = modules
-    model.output_device = output_device
-    model.loaded_tp = loaded_tp
-    model.active_devices = [0] if active_devices is None else active_devices
-    model.config = FakeConfig(moe_cpu_hosts)
-    return model
+from freeze_fakes import FakeModule, make_model
 
 
 def test_freeze_rejects_an_unloaded_model():

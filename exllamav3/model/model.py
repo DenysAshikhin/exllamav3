@@ -268,10 +268,19 @@ class Model(Model_TPMixin, Model_LSMixin):
         """
         Refuse a snapshot that could not reload itself.
 
-        Restore replays load() with the snapshot as the only tensor source, so every module that
-        read a tensor while loading from disk has to contribute at least one tensor under its own
-        key. A module that reads and contributes nothing raises "Required tensor ... not found"
-        during restore instead, once the VRAM copy is already gone.
+        Restore replays load() with the snapshot as the only tensor source, so a module whose whole
+        subtree contributes nothing raises "Required tensor ... not found" during restore instead,
+        once the VRAM copy is already gone. That is the case this catches: a leaf module that reads
+        and snapshots nothing (Qwen3VLPosEmbedding, Glm4VPosEmbedding before their get_tensors()).
+
+        Coverage is deliberately subtree-wide - a module counts as covered when anything under its
+        key is snapshotted, including a child's tensors. It cannot be tightened to require each
+        module to contribute at its own level, because re-canonicalisation legitimately moves a
+        parent's fused read into its children's keys: vision Attention reads a fused
+        <key>.qkv.weight and snapshots it as <key>.q_proj.weight and siblings, so a per-module rule
+        rejects a model that restores perfectly well. A module that owns a raw tensor *and* has
+        contributing children is therefore not covered here and is pinned by per-module round-trip
+        tests instead (tests/test_vision_module_freeze_roundtrip.py).
         """
         read_keys = getattr(self.config.stc, "read_keys", None)
         if read_keys is None:
