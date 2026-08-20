@@ -1,0 +1,53 @@
+import torch
+
+from exllamav3.loader.frozen_tensors import FrozenTensorSource
+from exllamav3.modules.arch_specific.qwen3_vl import Qwen3VLPosEmbedding
+
+
+class SourceCollection:
+    """Minimal stc stand-in serving tensors from a frozen source, exactly as restore does."""
+
+    def __init__(self, source):
+        self.source = source
+
+    def has_tensor(self, key):
+        return self.source.has_tensor(key)
+
+    def has_tensor_group(self, key, subkeys):
+        return self.source.has_tensor_group(key, subkeys)
+
+    def get_tensor(self, key, device=None, **kwargs):
+        return self.source.get_tensor(key, device, **kwargs)
+
+    def get_tensors(self, prefix, device=None, allow_bf16=False):
+        return self.source.get_tensors(prefix, device, allow_bf16)
+
+
+class SourceConfig:
+    def __init__(self, source):
+        self.stc = SourceCollection(source)
+
+
+def make_qwen3_vl_pos_embedding(config):
+    return Qwen3VLPosEmbedding(
+        config,
+        "model.visual.pos_embed",
+        num_position_embeddings=16,
+        hidden_size=8,
+        spatial_merge_size=2,
+        out_dtype=torch.float,
+    )
+
+
+def test_qwen3_vl_pos_embedding_round_trips_through_a_frozen_source():
+    weight = torch.randn((16, 8), dtype=torch.float16)
+    disk = FrozenTensorSource({"model.visual.pos_embed.weight": weight})
+
+    live = make_qwen3_vl_pos_embedding(SourceConfig(disk))
+    live.load(torch.device("cpu"))
+
+    frozen = FrozenTensorSource(live.get_tensors())
+    restored = make_qwen3_vl_pos_embedding(SourceConfig(frozen))
+    restored.load(torch.device("cpu"))
+
+    torch.testing.assert_close(restored.embedding.weight, live.embedding.weight)

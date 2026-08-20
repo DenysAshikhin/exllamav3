@@ -122,6 +122,13 @@ class Qwen3VLPosEmbedding(Module):
         self.embedding = None
 
 
+    @override
+    def get_tensors(self):
+        return {
+            f"{self.key}.weight": self.embedding.weight.data.contiguous()
+        }
+
+
     def forward(
         self,
         x: torch.Tensor,
