@@ -63,6 +63,13 @@ class Gemma4VisionPatchEmbedder(Module):
 
 
     @override
+    def get_tensors(self):
+        t = super().get_tensors()
+        t[self.position_embedding_key] = self.position_embedding_table.contiguous()
+        return t
+
+
+    @override
     def weights_numel(self):
         return super().weights_numel() + self.position_embedding_numel
 
