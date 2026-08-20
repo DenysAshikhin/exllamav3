@@ -60,6 +60,21 @@ class Glm4VPosEmbedding(Module):
         self.pos_embed_2d = None
 
 
+    @override
+    def get_tensors(self):
+        # load() folds the flat (N, H) checkpoint tensor into (1, H, sqrt(N), sqrt(N)); the snapshot
+        # has to carry the flat layout back, because restore re-runs load() against it
+        weight = (
+            self.pos_embed_2d
+            .squeeze(0)
+            .permute(1, 2, 0)
+            .reshape(-1, self.hidden_size)
+        )
+        return {
+            f"{self.key}.weight": weight.contiguous()
+        }
+
+
     def forward(
         self,
         x: torch.Tensor,

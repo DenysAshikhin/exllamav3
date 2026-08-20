@@ -1,6 +1,7 @@
 import torch
 
 from exllamav3.loader.frozen_tensors import FrozenTensorSource
+from exllamav3.modules.arch_specific.glm4v import Glm4VPosEmbedding
 from exllamav3.modules.arch_specific.qwen3_vl import Qwen3VLPosEmbedding
 
 
@@ -51,3 +52,28 @@ def test_qwen3_vl_pos_embedding_round_trips_through_a_frozen_source():
     restored.load(torch.device("cpu"))
 
     torch.testing.assert_close(restored.embedding.weight, live.embedding.weight)
+
+
+def make_glm4v_pos_embedding(config):
+    return Glm4VPosEmbedding(
+        config,
+        "model.visual.embeddings.position_embedding",
+        num_position_embeddings=16,
+        hidden_size=8,
+        spatial_merge_size=2,
+        out_dtype=torch.float,
+    )
+
+
+def test_glm4v_pos_embedding_round_trips_through_a_frozen_source():
+    weight = torch.randn((16, 8), dtype=torch.float16)
+    disk = FrozenTensorSource({"model.visual.embeddings.position_embedding.weight": weight})
+
+    live = make_glm4v_pos_embedding(SourceConfig(disk))
+    live.load(torch.device("cpu"))
+
+    frozen = FrozenTensorSource(live.get_tensors())
+    restored = make_glm4v_pos_embedding(SourceConfig(frozen))
+    restored.load(torch.device("cpu"))
+
+    torch.testing.assert_close(restored.pos_embed_2d, live.pos_embed_2d)
