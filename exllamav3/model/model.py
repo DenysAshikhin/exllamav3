@@ -260,7 +260,59 @@ class Model(Model_TPMixin, Model_LSMixin):
                 if key in tensors:
                     raise RuntimeError(f"Cannot freeze duplicate tensor key: {key}")
                 tensors[key] = value
+        self._validate_freeze_coverage(tensors)
         return tensors
+
+
+    def _validate_freeze_coverage(self, tensors: dict[str, torch.Tensor]):
+        """
+        Refuse a snapshot that could not reload itself.
+
+        Restore replays load() with the snapshot as the only tensor source, so every module that
+        read a tensor while loading from disk has to contribute at least one tensor under its own
+        key. A module that reads and contributes nothing raises "Required tensor ... not found"
+        during restore instead, once the VRAM copy is already gone.
+        """
+        read_keys = getattr(self.config.stc, "read_keys", None)
+        if read_keys is None:
+            raise RuntimeError(
+                "Cannot freeze: the tensor collection kept no record of loaded keys, so snapshot "
+                "coverage cannot be verified"
+            )
+
+        module_keys = {module.key for module in self if module.key}
+        covered = set()
+        for key in tensors:
+            parts = key.split(".")
+            for i in range(1, len(parts) + 1):
+                covered.add(".".join(parts[:i]))
+
+        missing = {}
+        for key in read_keys:
+            owner = self._owning_module_key(key, module_keys)
+            if owner is None or owner in covered:
+                continue
+            missing.setdefault(owner, key)
+
+        if missing:
+            detail = "; ".join(f"{owner} (e.g. {key})" for owner, key in sorted(missing.items()))
+            raise RuntimeError(
+                "Cannot freeze: these modules loaded tensors the snapshot does not carry, so "
+                f"restoring from it would fail: {detail}"
+            )
+
+
+    @staticmethod
+    def _owning_module_key(key: str, module_keys: set[str]) -> str | None:
+        """The deepest module key that is `key` itself or a dotted prefix of it, if any."""
+        candidate = key
+        while True:
+            if candidate in module_keys:
+                return candidate
+            cut = candidate.rfind(".")
+            if cut < 0:
+                return None
+            candidate = candidate[:cut]
 
 
     def _validate_freeze_devices(self, tensors: dict[str, torch.Tensor]):

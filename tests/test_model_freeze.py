@@ -10,14 +10,21 @@ from exllamav3.loader.safetensors import SafetensorsCollection, VariantSafetenso
 from exllamav3.model.model import Model
 
 
+class FakeCollection:
+    def __init__(self):
+        self.read_keys = set()
+
+
 class FakeConfig:
     def __init__(self, moe_cpu_hosts=None):
         self.moe_cpu_hosts = {} if moe_cpu_hosts is None else moe_cpu_hosts
+        self.stc = FakeCollection()
 
 
 class FakeModule:
-    def __init__(self, device, tensors):
+    def __init__(self, device, tensors, key="model.fake"):
         self.device = device
+        self.key = key
         self._tensors = tensors
 
     def __iter__(self):
