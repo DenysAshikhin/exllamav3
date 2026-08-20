@@ -1,1 +1,1 @@
-__version__ = "1.4.2+siftkit.freeze"
+__version__ = "1.4.2+siftkit.freeze2"
