@@ -220,6 +220,10 @@ class SafetensorsCollection:
         self.deferred_mode = False
         self.deferred_loads = []
 
+        # Keys this collection has actually served from disk. Model.freeze() compares the snapshot
+        # against this ledger, because a restore replays load() with the snapshot as its only source
+        self.read_keys: set[str] = set()
+
 
     def add_tensor_files(
         self,
@@ -442,6 +446,11 @@ class SafetensorsCollection:
                 raise ValueError(f"Required tensor {key} not found in any *.safetensors file in {self.directory}")
             else:
                 return None
+
+        # Recorded here rather than at each return: everything past this point is a key this
+        # collection owns and resolved. The new_tensors-only path above belongs to the quantizer,
+        # which never freezes
+        self.read_keys.add(key)
 
         if device is None:
             device = torch.device("cpu")
@@ -781,6 +790,14 @@ class VariantSafetensorsCollection(SafetensorsCollection):
             if rx.fullmatch(key):
                 return stc
         return self.main
+
+
+    @property
+    def read_keys(self) -> set[str]:
+        keys = set(self.main.read_keys)
+        for _, _, stc in self.stcs:
+            keys |= stc.read_keys
+        return keys
 
 
     def has_tensor(
