@@ -30,11 +30,13 @@ class DiffStats:
     """Accumulates ppl over the model's own logits, and (if a reference store is given) KLD vs
     the reference, per-token, bucketed by the reference's top-token probability."""
 
-    def __init__(self, ids: torch.Tensor, ranges: list, vocab_size: int, ref_store: str | None):
+    def __init__(self, ids: torch.Tensor, ranges: list, vocab_size: int, ref_store: str | None,
+                 device: torch.device):
         self.ids = ids
         self.ranges = ranges          # per row: (a, b) - score logits positions [a, b)
         self.vocab_size = vocab_size
         self.ref_store = ref_store
+        self.device = device
         self.logprob_sum = 0.0
         self.logprob_count = 0
         self.total_count = 0
@@ -43,7 +45,11 @@ class DiffStats:
 
     def __call__(self, r: int, logits: torch.Tensor):
         a, b = self.ranges[r]
-        logits = logits[:, a:b, :].float()
+        # Slice before moving to the device: a backend that produces logits on the host (llamacpp)
+        # would otherwise transfer the whole padded row, which is unbounded by the scored span.
+        # At 248k vocab that is 4 GB per 4096 positions, so an 8262-token row OOMs beside the
+        # backend's own weights while its ~4095 scored positions fit
+        logits = logits[:, a:b, :].to(self.device, torch.float32)
         logits.clamp_(min = -200.0)
 
         # ppl on own logits. Non-finite positions (a model NaN-ing on some input, e.g. fp16

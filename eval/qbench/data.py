@@ -25,7 +25,7 @@ DATASETS = {
     },
     "openwebtext10k": {
         "path": "parquet", "name": None, "split": "train",
-        "data_files": "hf://datasets/stas/openwebtext-10k@refs/convert/parquet/plain_text/train/*.parquet",
+        "data_files": "D:/personal/models/elx3/datasets/openwebtext10k/plain_text/train/0000.parquet",
         "text_column": "text", "display_name": "openwebtext",
     },
     # Local 23 GB OpenWebText, deliberately a SINGLE shard: get_test_ids joins the whole split
@@ -36,6 +36,16 @@ DATASETS = {
         "path": "parquet", "name": None, "split": "train",
         "data_files": "D:/personal/models/elx3/datasets/openwebtext/plain_text/train-00000-of-00080.parquet",
         "text_column": "text", "display_name": "openwebtext",
+    },
+    # Permissively-licensed GitHub Python, for KLD on code rather than prose: long runs of
+    # near-deterministic boilerplate where the reference is very confident, which is where
+    # quantization error concentrates. One 183 MB shard (51,792 files), same single-shard
+    # reason as openwebtext above. bigcode/the-stack-smol is the better-known equivalent but
+    # is a gated repo, so it needs an authenticated download this box has no token for.
+    "codeparrot_python": {
+        "path": "parquet", "name": None, "split": "train",
+        "data_files": "hf://datasets/codeparrot/codeparrot-clean-valid@refs/convert/parquet/default/train/0000.parquet",
+        "text_column": "content", "display_name": "codeparrot-python",
     },
 }
 
@@ -66,6 +76,24 @@ def source_stamp(path: str):
         return int(os.path.getmtime(path))
     except OSError:
         return 0
+
+
+def model_cache_key(model: dict, noise_eps: float = 0) -> str:
+    cache_id = model.get("cache_id")
+    if not isinstance(cache_id, str) or not cache_id.strip():
+        raise ValueError(f"Model {model.get('label', '<unlabeled>')} requires a non-empty cache_id")
+    options = {
+        key: value
+        for key, value in model.get("options", {}).items()
+        if key != "streaming"
+    }
+    return sha_key({
+        "v": 2,
+        "cache_id": cache_id.strip(),
+        "engine": model["engine"],
+        "options": options,
+        "noise": noise_eps,
+    })
 
 
 def save_tensors(filename: str, tensors: dict):
@@ -106,6 +134,18 @@ def resolve_project_paths(project: dict, project_file: str):
                 v["file"] = resolve(v["file"])
         else:
             output[key] = resolve(v)
+
+
+def prepare_output_dirs(project: dict):
+    for value in project.get("output", {}).values():
+        if isinstance(value, dict):
+            path = value.get("file")
+        elif isinstance(value, str):
+            path = value
+        else:
+            continue
+        if path:
+            os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok = True)
 
 
 class QCache:

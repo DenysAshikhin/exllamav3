@@ -385,6 +385,11 @@ class TransformersBackend:
     CT_SUFFIXES = ("weight_packed", "weight_scale", "weight_zero_point", "weight_shape", "weight_g_idx",
                    "weight_global_scale", "input_global_scale")
 
+    def _release_shards(self):
+        for handle in self.shard_handles.values():
+            handle.__exit__(None, None, None)
+        self.shard_handles.clear()
+
     def _read_shard(self, name):
         fn, ck_name = self.tensor_index[name]
         fn = os.path.join(self.source, fn)
@@ -586,6 +591,7 @@ class TransformersBackend:
             for pn, p in list(sub._parameters.items()):
                 if p is not None and not p.is_meta:
                     sub._parameters[pn] = torch.nn.Parameter(p.to("meta"), requires_grad = False)
+        self._release_shards()
 
     @torch.inference_mode()
     def _run_streaming(self, ids: torch.Tensor, callback, noise_eps: float = None):
@@ -681,7 +687,7 @@ class TransformersBackend:
 
     def close(self):
         del self.model
-        self.shard_handles.clear()
+        self._release_shards()
         free_mem()
 
 
@@ -749,7 +755,11 @@ class LlamaCppBackend:
             n_ctx = max_len,
             n_batch = 512,
             n_ubatch = 512,
-            n_gpu_layers = options.get("n_gpu_layers", 999),
+            n_gpu_layers = options.get("n_gpu_layers", "auto"),
+            cpu_moe = options.get("cpu_moe", False),
+            n_cpu_moe = options.get("n_cpu_moe", 0),
+            n_threads = options.get("n_threads", None),
+            n_threads_batch = options.get("n_threads_batch", None),
             split_mode = split_modes[options.get("split_mode", "layer")],
             main_gpu = options.get("main_gpu", 0),
         )
@@ -769,8 +779,12 @@ class LlamaCppBackend:
                     self.model._hybrid_cache_mgr.clear()
                 self.model.reset()
                 self.model.eval(ids[r].tolist())
+                # Left on the host: llama.cpp writes scores for every position in the context,
+                # and DiffStats moves only the scored slice to the device. Copying the whole
+                # row here is 4 GB per 4096 positions at this vocab size, on top of the weights
+                # llama.cpp already holds on the same card
                 logits = torch.from_numpy(self.model.scores).unsqueeze(0)
-                logits = logits[:, :ids.shape[1]].to(self.device)
+                logits = logits[:, :ids.shape[1]]
                 callback(r, logits)
                 pb.update(r + 1)
 

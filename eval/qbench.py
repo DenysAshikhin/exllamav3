@@ -39,6 +39,8 @@ from qbench.data import (
     QCache,
     dataset_subtitle,
     get_test_rows,
+    model_cache_key,
+    prepare_output_dirs,
     resolve_project_paths,
     save_tensors,
     sha_key,
@@ -63,6 +65,7 @@ def main(args):
     with open(args.project, "r", encoding = "utf8") as f:
         project = yaml.safe_load(f)
     resolve_project_paths(project, args.project)
+    prepare_output_dirs(project)
 
     device = torch.device("cuda", args.device)
     cache = QCache(project["logit_cache"])
@@ -85,23 +88,7 @@ def main(args):
     assert len(refs) == 1, f"Project must define exactly one model in the 'reference' group (found {len(refs)})"
     ref = refs[0]
 
-    def model_key(mspec, noise = False):
-        # "streaming" is an execution strategy, not a model property; keep it out of the key so
-        # toggling it preserves cached logits. Streamed and non-streamed passes are bitwise
-        # identical at matching batch shapes; the streamed pass batches all rows, so vs the
-        # per-row non-streamed pass the difference is batch-size kernel numerics - the same
-        # class of variation as a driver update, well below any model's self-noise floor
-        options = {k: v for k, v in mspec.get("options", {}).items() if k != "streaming"}
-        return sha_key({
-            "v": 1,
-            "engine": mspec["engine"],
-            "source": mspec["source"],
-            "options": options,
-            "stamp": source_stamp(mspec["source"]),
-            "noise": BF16_ROUNDING_EPS if noise else 0,
-        })
-
-    ref_key = model_key(ref)
+    ref_key = model_cache_key(ref)
     ref_store = cache.logits_dir(f"{data_key}_{ref_key}")
     ref_meta = os.path.join(ref_store, "meta.json")
 
@@ -113,7 +100,7 @@ def main(args):
     if ref_results is None or not os.path.exists(ref_meta):
         os.makedirs(ref_store, exist_ok = True)
         backend = open_backend(ref, max_len, device)
-        stats = DiffStats(ids, ranges, vocab_size, None)
+        stats = DiffStats(ids, ranges, vocab_size, None, device)
         conf_rows = []
         def ref_callback(r, logits):
             stats(r, logits)
@@ -131,11 +118,11 @@ def main(args):
 
     # ------ Noise floor: reference engine + bf16-rounding noise per layer, vs cached logits
     if project.get("noise_floor", True) and ref["engine"] != "llamacpp":
-        floor_results_key = f"{data_key}_{ref_key}_{model_key(ref, noise = True)}_m{METRICS_VERSION}"
+        floor_results_key = f"{data_key}_{ref_key}_{model_cache_key(ref, BF16_ROUNDING_EPS)}_m{METRICS_VERSION}"
         floor_results = cache.load_results(floor_results_key)
         if floor_results is None:
             backend = open_backend(ref, max_len, device)
-            stats = DiffStats(ids, ranges, vocab_size, ref_store)
+            stats = DiffStats(ids, ranges, vocab_size, ref_store, device)
             backend.run(ids, stats, noise_eps = BF16_ROUNDING_EPS)
             floor_results = stats.results()
             floor_results.update(backend.info)
@@ -153,11 +140,11 @@ def main(args):
     for mspec in models:
         if mspec is ref:
             continue
-        results_key = f"{data_key}_{ref_key}_{model_key(mspec)}_m{METRICS_VERSION}"
+        results_key = f"{data_key}_{ref_key}_{model_cache_key(mspec)}_m{METRICS_VERSION}"
         res = cache.load_results(results_key)
         if res is None:
             backend = open_backend(mspec, max_len, device)
-            stats = DiffStats(ids, ranges, vocab_size, ref_store)
+            stats = DiffStats(ids, ranges, vocab_size, ref_store, device)
             backend.run(ids, stats)
             res = stats.results()
             res.update(backend.info)

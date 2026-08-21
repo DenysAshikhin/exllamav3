@@ -1,5 +1,6 @@
 transformers>=4.50.0
 datasets
+accelerate
 gguf>=0.14.0
 llama-cpp-python
 human_eval==1.0.3

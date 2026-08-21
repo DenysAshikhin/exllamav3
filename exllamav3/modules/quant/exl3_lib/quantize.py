@@ -715,6 +715,9 @@ finalize_capture_H_mutex = threading.Lock()
 def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
     with finalize_capture_H_mutex:
 
+        if H_data["finalized"]:
+            return H_data["q_fallback"], H_data["H"], H_data["L"], H_data["su"], H_data["diag"]
+
         if H_data["H"].is_meta:
             H_data["L"] = None
             H_data["finalized"] = True
@@ -728,14 +731,27 @@ def finalize_capture_H(H_data: dict, quant_args: dict, verbose: bool):
 
             return True, None, None, su, None
 
+        nonfinite_counts = H_data.get("inf_nan")
+        if nonfinite_counts is not None and nonfinite_counts.sum().item():
+            print(" !! Non-finite calibration state, using fallback quantization")
+            H = H_data["H"].cpu()
+            H_data.pop("H_swap_device", None)
+            k = H.shape[0]
+            su = (torch.randn(k, device = H_data["device"]).sign() + 1e-5).sign().to(torch.float).unsqueeze(1)
+            H_data["H"] = H
+            H_data["L"] = None
+            H_data["su"] = su
+            H_data["diag"] = None
+            H_data["q_fallback"] = True
+            H_data["finalized"] = True
+            return True, H, None, su, None
+
         # Unswap H
         if "H_swap_device" in H_data:
             H_data["H"] = H_data["H"].to(H_data["H_swap_device"])
             del H_data["H_swap_device"]
 
         H = H_data["H"]
-        if H_data["finalized"]:
-            return H_data["q_fallback"], H, H_data["L"], H_data["su"], H_data["diag"]
 
         # Mean of samples summed up during forward pass
         # Switch to uncalibrated fallback if no input activations or diagonal is too small (few activations)
