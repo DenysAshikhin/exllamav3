@@ -4,6 +4,8 @@ from .apertus import ApertusModel
 from .cohere import CohereModel
 from .cohere2 import Cohere2Model
 from .decilm import DeciLMModel
+from .deepseek_v3 import DeepseekV3Model
+from .deepseek_v4 import DeepseekV4Model
 from .dflash import DFlashModel
 from .dflash_laguna import DFlashLagunaModel
 from .dots1 import Dots1Model
@@ -17,6 +19,7 @@ from .glm4 import Glm4Model
 from .glm4_moe import Glm4MoeModel
 from .glm4v import Glm4VModel
 from .glm4v_moe import Glm4VMoeModel
+from .glm_moe_dsa import GlmMoeDsaModel
 from .gpt_oss import GptOssModel
 from .hcxvisionv2 import HCXVisionV2Model
 from .hy_v3 import HyV3Model
@@ -31,7 +34,8 @@ from .ministral3 import Ministral3Model
 from .mistral import MistralModel
 from .mistral3 import Mistral3Model
 from .mixtral import MixtralModel
-from .nanochat import NanoChatModel
+from .muse_glimmer import MuseGlimmerTextModel
+from .muse_glimmer_assistant import MuseGlimmerAssistantModel
 from .nemotronh import NemotronHModel
 from .olmo3 import Olmo3Model
 from .olmohybrid import OlmoHybridModel
@@ -62,6 +66,8 @@ ARCHITECTURES = {
         CohereModel,
         Cohere2Model,
         DeciLMModel,
+        DeepseekV3Model,
+        DeepseekV4Model,
         DFlashModel,
         DFlashLagunaModel,
         Dots1Model,
@@ -77,6 +83,7 @@ ARCHITECTURES = {
         Glm4MoeModel,
         Glm4VModel,
         Glm4VMoeModel,
+        GlmMoeDsaModel,
         GptOssModel,
         HCXVisionV2Model,
         HyV3Model,
@@ -91,7 +98,8 @@ ARCHITECTURES = {
         MistralModel,
         Mistral3Model,
         MixtralModel,
-        NanoChatModel,
+        MuseGlimmerTextModel,
+        MuseGlimmerAssistantModel,
         NemotronHModel,
         Olmo3Model,
         OlmoHybridModel,

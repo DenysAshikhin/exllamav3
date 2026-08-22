@@ -179,10 +179,6 @@ class Model(Model_TPMixin, Model_LSMixin):
         raise NotImplementedError()
 
 
-    def per_layer_quant_preamble(self, params: dict):
-        pass
-
-
     @torch.inference_mode
     def prefill(self, input_ids: torch.Tensor, params: dict | None = None):
         """
@@ -235,6 +231,11 @@ class Model(Model_TPMixin, Model_LSMixin):
         self.active_devices = []
         self.unload_tp()
         self.output_device = None
+        # Attached caches lose their layer tensors with the modules that allocated them
+        for ref in self.cache_weakrefs.values():
+            cache = ref()
+            if cache is not None:
+                cache.initialized = False
 
 
     def load_gen(
@@ -367,6 +368,7 @@ class Model(Model_TPMixin, Model_LSMixin):
             assert not tensor_p, \
                 "Cannot use tensor_p when loading to single device."
             self._load_single(progressbar, device, self.config, self.modules, verbose)
+            self.output_device = self.modules[-1].device
 
         # Use/reserve
         else:
@@ -463,6 +465,12 @@ class Model(Model_TPMixin, Model_LSMixin):
 
         # Release all global shared tensors (refs still held by modules until model is unloaded)
         g_tensor_cache.drop_all()
+
+        # Mark every attached cache usable.
+        for ref in self.cache_weakrefs.values():
+            cache = ref()
+            if cache is not None:
+                cache.initialized = True
 
 
     @torch.inference_mode

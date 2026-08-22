@@ -183,6 +183,7 @@ def main(args):
         metric_label = r"perplexity"
         metric_label_valign = "center"
         plot_file = None
+        y_log = False
 
     # Plot outputs accept a plain path or {file, ...options}; options are per-plot
     def plot_spec(key):
@@ -227,6 +228,7 @@ def main(args):
     floor_line = {"label": "noise floor, mean", "value": floor_res["kld"]} if floor_res else None
 
     def scatter(key, kld, vram):
+        # Spec is either a filename or a dict: {file: ..., y_log: true}
         path, spec = plot_spec(key)
         if not path:
             return
@@ -240,6 +242,7 @@ def main(args):
         )
         pa.metric_label_valign = "bottom" if kld else "center"
         pa.plot_file = path
+        pa.y_log = bool(spec.get("y_log", False))
         plot_scatter(
             plot_entries(with_kld = kld, include_ref = kld, exclude = excluded(spec)),
             pa,
