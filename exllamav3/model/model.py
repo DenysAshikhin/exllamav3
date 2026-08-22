@@ -232,6 +232,11 @@ class Model(Model_TPMixin, Model_LSMixin):
         self.active_devices = []
         self.unload_tp()
         self.output_device = None
+        # Attached caches lose their layer tensors with the modules that allocated them
+        for ref in self.cache_weakrefs.values():
+            cache = ref()
+            if cache is not None:
+                cache.initialized = False
 
 
     def freeze(self) -> FrozenTensorSource:
@@ -680,6 +685,12 @@ class Model(Model_TPMixin, Model_LSMixin):
 
         # Release all global shared tensors (refs still held by modules until model is unloaded)
         g_tensor_cache.drop_all()
+
+        # Mark every attached cache usable.
+        for ref in self.cache_weakrefs.values():
+            cache = ref()
+            if cache is not None:
+                cache.initialized = True
 
 
     @torch.inference_mode
