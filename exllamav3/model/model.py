@@ -7,6 +7,7 @@ from ..util import parse_int_list
 from ..util.memory import free_mem
 from .model_tp import Model_TPMixin
 from .model_ls import Model_LSMixin
+from ..loader.frozen_tensors import FrozenTensorSource
 from ..util.tensor import g_tensor_cache
 from ..cache.recurrent_util import advance_recurrent_states
 
@@ -238,6 +239,177 @@ class Model(Model_TPMixin, Model_LSMixin):
                 cache.initialized = False
 
 
+    def freeze(self) -> FrozenTensorSource:
+        """
+        Snapshot the authoritative tensors of a loaded single-device model in system RAM.
+        """
+        tensors = self._validate_freeze_state()
+        self._validate_freeze_devices(tensors)
+        return FrozenTensorSource({
+            key: value.detach().to(device = "cpu", copy = True).contiguous()
+            for key, value in tensors.items()
+        })
+
+
+    def _validate_freeze_state(self) -> dict[str, torch.Tensor]:
+        if self.output_device is None or any(module.device is None for module in self):
+            raise RuntimeError("Model must be fully loaded before freezing")
+        if self.loaded_tp:
+            raise RuntimeError("Cannot freeze a tensor-parallel model")
+        if getattr(self.config, "moe_cpu_hosts", {}):
+            raise RuntimeError("Cannot freeze a model with CPU-offloaded MoE")
+
+        tensors = {}
+        for module in self:
+            for key, value in module.get_tensors().items():
+                if key in tensors:
+                    raise RuntimeError(f"Cannot freeze duplicate tensor key: {key}")
+                tensors[key] = value
+        self._validate_freeze_coverage(tensors)
+        return tensors
+
+
+    def _validate_freeze_coverage(self, tensors: dict[str, torch.Tensor]):
+        """
+        Refuse a snapshot that could not reload itself.
+
+        Restore replays load() with the snapshot as the only tensor source, so a module whose whole
+        subtree contributes nothing raises "Required tensor ... not found" during restore instead,
+        once the VRAM copy is already gone. That is the case this catches: a leaf module that reads
+        and snapshots nothing (Qwen3VLPosEmbedding, Glm4VPosEmbedding before their get_tensors()).
+
+        Coverage is deliberately subtree-wide - a module counts as covered when anything under its
+        key is snapshotted, including a child's tensors. It cannot be tightened to require each
+        module to contribute at its own level, because re-canonicalisation legitimately moves a
+        parent's fused read into its children's keys: vision Attention reads a fused
+        <key>.qkv.weight and snapshots it as <key>.q_proj.weight and siblings, so a per-module rule
+        rejects a model that restores perfectly well. A module that owns a raw tensor *and* has
+        contributing children is therefore not covered here and is pinned by per-module round-trip
+        tests instead (tests/test_vision_module_freeze_roundtrip.py).
+        """
+        read_keys = getattr(self.config.stc, "read_keys", None)
+        if read_keys is None:
+            raise RuntimeError(
+                "Cannot freeze: the tensor collection kept no record of loaded keys, so snapshot "
+                "coverage cannot be verified"
+            )
+
+        module_keys = {module.key for module in self if module.key}
+        covered = set()
+        for key in tensors:
+            parts = key.split(".")
+            for i in range(1, len(parts) + 1):
+                covered.add(".".join(parts[:i]))
+
+        missing = {}
+        for key in read_keys:
+            owner = self._owning_module_key(key, module_keys)
+            if owner is None or owner in covered:
+                continue
+            missing.setdefault(owner, key)
+
+        if missing:
+            detail = "; ".join(f"{owner} (e.g. {key})" for owner, key in sorted(missing.items()))
+            raise RuntimeError(
+                "Cannot freeze: these modules loaded tensors the snapshot does not carry, so "
+                f"restoring from it would fail: {detail}"
+            )
+
+
+    @staticmethod
+    def _owning_module_key(key: str, module_keys: set[str]) -> str | None:
+        """The deepest module key that is `key` itself or a dotted prefix of it, if any."""
+        candidate = key
+        while True:
+            if candidate in module_keys:
+                return candidate
+            cut = candidate.rfind(".")
+            if cut < 0:
+                return None
+            candidate = candidate[:cut]
+
+
+    def _validate_freeze_devices(self, tensors: dict[str, torch.Tensor]):
+        cuda_devices = set()
+
+        def add_device(device):
+            if device is None:
+                return
+            normalized = torch.device(device)
+            if normalized.type == "cuda":
+                cuda_devices.add(normalized.index if normalized.index is not None else 0)
+
+        add_device(self.output_device)
+        for device in self.active_devices:
+            add_device(device)
+        for module in self:
+            add_device(module.device)
+        for tensor in tensors.values():
+            add_device(tensor.device)
+
+        if len(cuda_devices) != 1:
+            raise RuntimeError("Model freeze requires exactly one CUDA device")
+
+
+    def _validate_source_load(
+        self,
+        source: FrozenTensorSource,
+        device: torch.device | str | int | None,
+        tensor_p: bool,
+        reserve_per_device: list[float] | float | None,
+        use_per_device: list[float] | float | None,
+    ):
+        if not isinstance(source, FrozenTensorSource):
+            raise TypeError("source must be a FrozenTensorSource")
+        if any(not isinstance(key, str) for key in source.tensors):
+            raise ValueError("source keys must be strings")
+        if any(
+            not isinstance(tensor, torch.Tensor) or tensor.device.type != "cpu"
+            for tensor in source.tensors.values()
+        ):
+            raise ValueError("source must contain only CPU tensors")
+        if tensor_p or getattr(self, "loaded_tp", False):
+            raise RuntimeError("Cannot restore a source into a tensor-parallel model")
+        if getattr(self.config, "moe_cpu_hosts", {}):
+            raise RuntimeError("Cannot restore a source with CPU-offloaded MoE")
+        infer_params = getattr(self.config, "infer_params", None)
+        budget_name = "moe_cpu_offload" if getattr(self, "component", "text") == "text" else "draft_moe_cpu_offload"
+        if getattr(infer_params, budget_name, 0):
+            raise RuntimeError("Cannot restore a source with CPU-offloaded MoE")
+        if reserve_per_device is not None or use_per_device is not None:
+            raise RuntimeError("Source restore does not support split or multi-device placement")
+
+        cuda_devices = set()
+        for active_device in getattr(self, "active_devices", []):
+            normalized = torch.device(active_device)
+            if normalized.type == "cuda":
+                cuda_devices.add(normalized.index if normalized.index is not None else 0)
+        for module in self:
+            module_device = getattr(module, "device", None)
+            if module_device is not None:
+                normalized = torch.device(module_device)
+                if normalized.type == "cuda":
+                    cuda_devices.add(normalized.index if normalized.index is not None else 0)
+        if len(cuda_devices) > 1:
+            raise RuntimeError("Source restore does not support split or multi-device placement")
+
+        if device is not None:
+            if torch.device(device).type != "cuda":
+                raise RuntimeError("Source restore requires a CUDA device")
+            return
+
+        if torch.cuda.device_count() != 1:
+            raise RuntimeError("Source restore requires exactly one CUDA device")
+
+
+    def _abort_source_load(self):
+        try:
+            self.config.stc.abort_deferred_load()
+            self.unload()
+        finally:
+            g_tensor_cache.drop_all()
+
+
     def load_gen(
         self,
         device: torch.device | str | int | None = None,
@@ -257,6 +429,7 @@ class Model(Model_TPMixin, Model_LSMixin):
         max_batch_size: int = 1,
         tp_options: dict | None = None,
         autosplit_no_forward: bool = False,
+        source: FrozenTensorSource | None = None,
     ):
         """
         Load model, generator function. For regular function, call load() with the same arguments
@@ -348,6 +521,15 @@ class Model(Model_TPMixin, Model_LSMixin):
             For debug purposes, skip reference forward pass during autosplit load.
         """
 
+        if source is not None:
+            self._validate_source_load(
+                source,
+                device,
+                tensor_p,
+                reserve_per_device,
+                use_per_device,
+            )
+
         free_mem()
 
         # Route CPU-offloaded MoE layers to this component's own worker and budget (an MTP head
@@ -361,14 +543,45 @@ class Model(Model_TPMixin, Model_LSMixin):
         assert max_output_size >= 1, "max_output_size must be positive"
         assert max_output_factor >= 1, "max_output_factor must be positive"
 
+        source_installed = False
+
+        def clear_source():
+            nonlocal source_installed
+            if source_installed:
+                self.config.stc.set_frozen_source(None)
+                source_installed = False
+
+        if source is not None:
+            def source_callback(module, modules):
+                try:
+                    if callback is not None:
+                        callback(module, modules)
+                finally:
+                    if module == modules:
+                        clear_source()
+
+            callback_to_use = source_callback
+            autosplit_no_forward = True
+            self.config.stc.set_frozen_source(source)
+            source_installed = True
+        else:
+            callback_to_use = callback
+
         # Load to single device
         if device is not None:
             assert not bool(reserve_per_device) and not bool(use_per_device), \
                 "Cannot specify reserve_per_device or use_per_device when loading to single device."
             assert not tensor_p, \
                 "Cannot use tensor_p when loading to single device."
-            self._load_single(progressbar, device, self.config, self.modules, verbose)
-            self.output_device = self.modules[-1].device
+            try:
+                self._load_single(progressbar, device, self.config, self.modules, verbose)
+                self.output_device = self.modules[-1].device
+            except BaseException:
+                if source is not None:
+                    self._abort_source_load()
+                raise
+            finally:
+                clear_source()
 
         # Use/reserve
         else:
@@ -406,24 +619,31 @@ class Model(Model_TPMixin, Model_LSMixin):
 
             # Split load
             if not tensor_p:
-                yield from self._load_autosplit(
-                    progressbar,
-                    reserve_per_device,
-                    use_per_device,
-                    active_devices,
-                    max_chunk_size,
-                    max_output_size,
-                    max_output_factor,
-                    callback,
-                    generator,
-                    self.config,
-                    self.modules,
-                    verbose,
-                    max_batch_size,
-                    self.cache_weakrefs,
-                    autosplit_no_forward,
-                )
-                self.output_device = self.modules[-1].device
+                try:
+                    yield from self._load_autosplit(
+                        progressbar,
+                        reserve_per_device,
+                        use_per_device,
+                        active_devices,
+                        max_chunk_size,
+                        max_output_size,
+                        max_output_factor,
+                        callback_to_use,
+                        generator,
+                        self.config,
+                        self.modules,
+                        verbose,
+                        max_batch_size,
+                        self.cache_weakrefs,
+                        autosplit_no_forward,
+                    )
+                    self.output_device = self.modules[-1].device
+                except BaseException:
+                    if source is not None:
+                        self._abort_source_load()
+                    raise
+                finally:
+                    clear_source()
 
             # Tensor-P load:
             else:
