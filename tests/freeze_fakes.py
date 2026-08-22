@@ -58,5 +58,6 @@ def make_model(
     model.output_device = output_device
     model.loaded_tp = loaded_tp
     model.active_devices = [0] if active_devices is None else active_devices
+    model.cache_weakrefs = {}
     model.config = FakeConfig(moe_cpu_hosts, stc)
     return model
